@@ -1,14 +1,23 @@
 import base64
 import io
-import json
 import zipfile
 from typing import Dict, Any, List, Optional
 
 import pandas as pd
 import requests
 import streamlit as st
-from slugify import slugify
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# --- robust slugify import with fallback ---
+try:
+    from slugify import slugify  # from python-slugify
+except Exception:
+    import re, unicodedata
+    def slugify(value):
+        # fallback minimale (ASCII-only)
+        value = unicodedata.normalize("NFKD", str(value)).encode("ascii", "ignore").decode("ascii")
+        value = re.sub(r"[^a-zA-Z0-9-]+", "-", value.lower()).strip("-")
+        return re.sub(r"-+", "-", value)
 
 # -----------------------
 # Config & Helpers
@@ -58,7 +67,7 @@ default_status = st.sidebar.selectbox("Status prodotto", options=["active", "dra
 inventory_policy = st.sidebar.selectbox("Inventory policy", options=["deny", "continue"], index=0, help="Se esaurito: 'deny' blocca, 'continue' consente.")
 inventory_qty_default = st.sidebar.number_input("Quantità inventario di default", min_value=0, value=0, step=1)
 
-st.sidebar.caption("Le immagini sono abbinate per **SKU** o **Handle URL** (nome file che contiene SKU o handle).")
+st.sidebar.caption("Le immagini sono abbinate per **SKU** o **Handle URL** (il filename contiene SKU o handle).")
 
 # -----------------------
 # UI – Main
@@ -127,7 +136,6 @@ def create_product(payload: Dict[str, Any]) -> Dict[str, Any]:
     return api_post("/products.json", {"product": payload})
 
 def update_product_metafields(product_id: int, seo_title: Optional[str], seo_desc: Optional[str]) -> None:
-    # SEO: aggiorno title & meta description (Shopify: product[title], product[metafields_global_title_tag], product[metafields_global_description_tag])
     update = {"product": {}}
     if seo_title:
         update["product"]["metafields_global_title_tag"] = seo_title[:70]
@@ -173,14 +181,13 @@ if st.button("Crea prodotti su Shopify", type="primary", disabled=(df is None)):
         tags = str(row.get("Tag", "") or "").strip()
         seo_title = str(row.get("Titolo della pagina", "") or "").strip()
         seo_desc  = str(row.get("Meta descrizione", "") or "").strip()
-        handle    = str(row.get("Handle URL", "") or "").strip() or slugify(title) if title else None
+        handle    = str(row.get("Handle URL", "") or "").strip() or (slugify(title) if title else None)
 
         if not title:
             logs.append({"row": i, "title": title, "sku": sku, "status": "skipped", "reason": "Titolo mancante"})
             progress.progress((i + 1) / total)
             continue
 
-        # Variante base (Shopify richiede almeno una variant con prezzo)
         variant = {
             "sku": sku if sku else None,
             "price": str(default_price),
@@ -191,11 +198,9 @@ if st.button("Crea prodotti su Shopify", type="primary", disabled=(df is None)):
             "taxable": True
         }
 
-        # Tag puliti
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         tags_str = ", ".join(tag_list) if tag_list else None
 
-        # Allego immagini dal .zip se trovate (match su SKU o handle)
         images_payload = []
         if image_index:
             keys = [k for k in [sku, handle] if k]
@@ -219,11 +224,9 @@ if st.button("Crea prodotti su Shopify", type="primary", disabled=(df is None)):
             res = create_product(product_payload)
             prod = res.get("product", {})
             product_id = prod.get("id")
-            # SEO fields
             try:
                 update_product_metafields(product_id, seo_title, seo_desc)
             except ShopifyError as e:
-                # Non blocco su SEO
                 st.info(f"SEO non aggiornato per {title}: {e}")
 
             logs.append({
@@ -250,7 +253,6 @@ if st.button("Crea prodotti su Shopify", type="primary", disabled=(df is None)):
     st.subheader("Risultati")
     st.dataframe(log_df, use_container_width=True)
 
-    # Download log
     buf = io.StringIO()
     log_df.to_csv(buf, index=False)
     st.download_button("Scarica log CSV", buf.getvalue(), file_name="shopify_upload_log.csv", mime="text/csv")
